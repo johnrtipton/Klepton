@@ -34,3 +34,19 @@
   and fallback builds both compile/all-load link. Queue synchronization preserved.
 - Detailed evidence: scratch/perf/GRAPHICS-2026-10-11.md. Controlled device
   protocol: scratch/perf/GAMEPLAY-VALIDATION.md. No headset game launched.
+
+## Beat Saber comparison preparation
+
+- User selected Beat Saber 1.40.8 and explicitly requested preparing builds for
+  later. No test app installed or launched; no gameplay/FPS claim.
+- Created isolated baseline16c2f1e/optimized91b45d5 source copies with identical
+  local beatsaber140 target config, frontend, ANGLE and 23 fresh translations.
+  APK/25 ELF hashes and exact source/build identities saved in scratch manifest.
+- Both full Release app builds pass, C O2/Swift O. Both development signatures
+  deep/strict verify; profiles carry memory capabilities and this physical
+  device. New separate bundle IDs prevent replacing the installed game.
+- Retrieved matching1.40.8 OBB read-only from installed app container into local
+  scratch. Local hash and full ZIP CRC validation pass. Future staging script
+  has syntax checked only; it has not installed/staged either variant.
+- Artifacts and scripts: scratch/review/beat-saber-ab (untracked/local).
+  Evidence and later-run instructions: scratch/perf/BEATSABER-AB-2026-10-11.md.

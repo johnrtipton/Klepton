@@ -1,7 +1,8 @@
 # Controlled gameplay comparison
 
-Status: prepared protocol; no headset gameplay comparison has run.
-Use Beat Saber 1.40.8 for the GLES path unless a different game is selected.
+Status: Beat Saber 1.40.8 selected; signed baseline/optimized Release builds
+prepared for later at the user's request. No headset comparison has run.
+Build identities and preparation evidence: BEATSABER-AB-2026-10-11.md.
 Use a Vulkan game separately to assess the image registry and frame wait.
 
 ## Freeze the comparison
