@@ -5734,7 +5734,22 @@ static void klfb_CompressedTexSubImage3D(uint32_t target, int32_t level, int32_t
 static struct { int32_t fb; unsigned draws; uint64_t tid; } g_draw_fbs[KLFB_MAX_FBS];
 static unsigned g_ndraw_fbs;
 
+static pthread_once_t g_draw_tracking_once = PTHREAD_ONCE_INIT;
+static int g_draw_tracking;
+static void klfb_draw_tracking_init(void) {
+    g_draw_tracking = kl_env_on("KL_GLFB_DRAW_CENSUS", 0)
+        || kl_env_int("KL_GL_CENSUS", 0) > 0
+        || kl_env_on("KL_GLFB_BLIT_PROBE", 0);
+}
+static int klfb_draw_tracking(void) {
+    pthread_once(&g_draw_tracking_once, klfb_draw_tracking_init);
+    return g_draw_tracking;
+}
+
 static void klfb_note_draw(void) {
+    // The live query, thread ID and census are diagnostics. The last-draw FBO
+    // is consumed only by BLIT_PROBE, which also enables tracking above.
+    if (!klfb_draw_tracking()) return;
     int32_t fb = -1;
     if (a_glGetIntegerv) a_glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
     // Fall back to the binding Klepton tracks in the glBindFramebuffer wrapper when
@@ -5792,6 +5807,11 @@ void kl_glfb_draw_census(FILE *f) {
     if (g_blits)
         fprintf(f, "  [glfb] glBlitFramebuffer: %lu, of which %lu read the "
                    "DEFAULT framebuffer\n", g_blits, g_blits_read0);
+    if (!klfb_draw_tracking()) {
+        fprintf(f, "  [glfb] draw census disabled — KL_GLFB_DRAW_CENSUS=1 "
+                   "or KL_GL_CENSUS=N enables it\n");
+        return;
+    }
     if (!g_ndraw_fbs) return;
     fprintf(f, "  [glfb] draws per framebuffer:\n");
     for (unsigned i = 0; i < g_ndraw_fbs; i++) {
@@ -5850,10 +5870,17 @@ static void klfb_service_capture(void);
 // (the capture keeps meeting them as pre-existing), so one of its own calls is
 // failing silently — this names it. Consumes the error; the guest demonstrably
 // was not reading them anyway.
+static pthread_once_t g_errprobe_once = PTHREAD_ONCE_INIT;
+static int g_errprobe;
+static void klfb_errprobe_init(void) {
+    g_errprobe = kl_env_on("KL_GLFB_ERRPROBE", 0);
+}
+static int klfb_errprobe_enabled(void) {
+    pthread_once(&g_errprobe_once, klfb_errprobe_init);
+    return g_errprobe;
+}
 static void klfb_errprobe(const char *what, const char *detail) {
-    static int on = -1, said;
-    if (on < 0) on = kl_env_on("KL_GLFB_ERRPROBE", 0);
-    if (!on || !a_glGetError) return;
+    if (!klfb_errprobe_enabled() || !a_glGetError) return;
     // Consumes the pending error. Called before and after the real call:
     // "pre=0xN" on the BEFORE line is an earlier unwrapped call's leftover, on
     // the AFTER line it is provably this call's own error.
@@ -5886,7 +5913,6 @@ static void klfb_errprobe(const char *what, const char *detail) {
         if (seen_n >= (int)(sizeof seen_keys / sizeof seen_keys[0])) return;
         seen_keys[seen_n++] = key;
     }
-    said++;
     fprintf(stderr, "  [glfb] ERRPROBE %s: pre=0x%x fb=%d program=%d viewport %dx%d%s\n",
             what, err, fb, prog, vp[2], vp[3], detail ? detail : "");
     if (err == 0x506 /* INVALID_FRAMEBUFFER_OPERATION */) {
@@ -6142,9 +6168,11 @@ static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
     klfb_errprobe0("glDrawElements(before)");
     if (g_real_DrawElements) g_real_DrawElements(mode, count, type, indices);
     klfb_draw_probe(count);
-    char d[64];
-    snprintf(d, sizeof d, " mode=0x%x count=%d type=0x%x", mode, count, type);
-    klfb_errprobe("glDrawElements(after)", d);
+    if (klfb_errprobe_enabled()) {
+        char d[64];
+        snprintf(d, sizeof d, " mode=0x%x count=%d type=0x%x", mode, count, type);
+        klfb_errprobe("glDrawElements(after)", d);
+    }
 }
 static void klfb_DrawArrays(uint32_t mode, int32_t first, int32_t count) {
     klfb_apply_vertex_bindings();
@@ -6170,9 +6198,11 @@ static void klfb_DrawRangeElements(uint32_t mode, uint32_t start, uint32_t end,
     if (g_real_DrawRangeElements)
         g_real_DrawRangeElements(mode, start, end, count, type, indices);
     klfb_draw_probe(count);
-    char d[64];
-    snprintf(d, sizeof d, " mode=0x%x count=%d type=0x%x", mode, count, type);
-    klfb_errprobe("glDrawRangeElements(after)", d);
+    if (klfb_errprobe_enabled()) {
+        char d[64];
+        snprintf(d, sizeof d, " mode=0x%x count=%d type=0x%x", mode, count, type);
+        klfb_errprobe("glDrawRangeElements(after)", d);
+    }
 }
 // The instanced/basevertex variants: Unity's actual scene geometry goes
 // through these, not the plain two — the first census wrapped only those and
@@ -6185,9 +6215,11 @@ static void klfb_DrawElementsInstanced(uint32_t mode, int32_t count, uint32_t ty
     if (g_real_DrawElementsInstanced)
         g_real_DrawElementsInstanced(mode, count, type, indices, instances);
     klfb_draw_probe(count * instances);
-    char di[64];
-    snprintf(di, sizeof di, " mode=0x%x count=%d inst=%d", mode, count, instances);
-    klfb_errprobe("glDrawElementsInstanced(after)", di);
+    if (klfb_errprobe_enabled()) {
+        char di[64];
+        snprintf(di, sizeof di, " mode=0x%x count=%d inst=%d", mode, count, instances);
+        klfb_errprobe("glDrawElementsInstanced(after)", di);
+    }
 }
 // glDrawElementsBaseVertex is core in GLES 3.2 but NOT in ES 3.0 — and ES 3.0
 // is what ANGLE's Metal backend gives us, while kl_egl describes 3.2, so Unity
@@ -6232,9 +6264,11 @@ static void klfb_DrawElementsBaseVertex(uint32_t mode, int32_t count, uint32_t t
             g_real_DrawElementsBaseVertex(mode, count, type, indices, basevertex);
     }
     klfb_draw_probe(count);
-    char db[72];
-    snprintf(db, sizeof db, " mode=0x%x count=%d basevertex=%d", mode, count, basevertex);
-    klfb_errprobe("glDrawElementsBaseVertex(after)", db);
+    if (klfb_errprobe_enabled()) {
+        char db[72];
+        snprintf(db, sizeof db, " mode=0x%x count=%d basevertex=%d", mode, count, basevertex);
+        klfb_errprobe("glDrawElementsBaseVertex(after)", db);
+    }
 }
 // glDrawRangeElementsBaseVertex — the SAME ES 3.2-vs-ES 3.0 gap as the call above,
 // one API family over, and the one that ate PORTAL. Source's togl draws its whole
@@ -6288,9 +6322,11 @@ static void klfb_DrawRangeElementsBaseVertex(uint32_t mode, uint32_t start, uint
             g_real_DrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
     }
     klfb_draw_probe(count);
-    char db[80];
-    snprintf(db, sizeof db, " mode=0x%x count=%d basevertex=%d", mode, count, basevertex);
-    klfb_errprobe("glDrawRangeElementsBaseVertex(after)", db);
+    if (klfb_errprobe_enabled()) {
+        char db[80];
+        snprintf(db, sizeof db, " mode=0x%x count=%d basevertex=%d", mode, count, basevertex);
+        klfb_errprobe("glDrawRangeElementsBaseVertex(after)", db);
+    }
 }
 static void klfb_DrawArraysInstanced(uint32_t mode, int32_t first, int32_t count,
                                      int32_t instances) {
@@ -6300,9 +6336,11 @@ static void klfb_DrawArraysInstanced(uint32_t mode, int32_t first, int32_t count
     if (g_real_DrawArraysInstanced)
         g_real_DrawArraysInstanced(mode, first, count, instances);
     klfb_draw_probe(count * instances);
-    char di[64];
-    snprintf(di, sizeof di, " mode=0x%x count=%d inst=%d", mode, count, instances);
-    klfb_errprobe("glDrawArraysInstanced(after)", di);
+    if (klfb_errprobe_enabled()) {
+        char di[64];
+        snprintf(di, sizeof di, " mode=0x%x count=%d inst=%d", mode, count, instances);
+        klfb_errprobe("glDrawArraysInstanced(after)", di);
+    }
 }
 
 // The pin table, out loud. A table that never fires and one that re-points half

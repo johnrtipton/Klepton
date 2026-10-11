@@ -29,6 +29,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/event.h>
 
 #include "klepton.h"
 #include "../runtime/kl_jni.h"
@@ -42,7 +43,8 @@ int    klb_pthread_mutex_unlock(void *m);
 void  *kl_ovrp_sym(const char *name);                       // runtime/xr/kl_ovrp.c
 size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes);
 int    kl_audio_open(unsigned rate, unsigned channels, unsigned bits);
-int    kl_audio_close(void);
+void   kl_audio_close(void);
+int    klb_epoll_wait(int fd, void *events, int maxevents, int timeout_ms);
 
 static volatile uint64_t g_sink;
 
@@ -162,6 +164,14 @@ static void b_audio(void *ctx, long n) {
     for (long i = 0; i < n; i++) g_sink += kl_audio_write_src(NULL, pcm, sizeof pcm);
 }
 
+static void b_epoll(void *ctx, long n) {
+    int fd = *(int *)ctx;
+    struct { uint32_t events, pad; uint64_t data; } events[64];
+    for (long i = 0; i < n; i++) {
+        if (klb_epoll_wait(fd, events, 64, 0) < 0) { perror("epoll benchmark"); exit(1); }
+    }
+}
+
 int main(void) {
     const char *e = getenv("KL_PERF_N");
     if (e) g_n = atol(e);
@@ -182,6 +192,11 @@ int main(void) {
 
     bench("mtx_uncontended", b_mtx, NULL);
     bench_mtx_contended();
+
+    int epfd = kqueue();
+    if (epfd < 0) { perror("kqueue"); return 1; }
+    bench("epoll_poll(64)", b_epoll, &epfd);
+    close(epfd);
 
     // ovrp: resolve the way a guest does (through kl_ovrp_sym), then call.
     // Pre-resolve a realistic spread of entry points first: ovrp_slot's table

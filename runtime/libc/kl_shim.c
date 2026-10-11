@@ -2271,7 +2271,7 @@ void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 // to the old cost (and a startup self-check catches it, below) rather than to
 // a wrong answer.
 #define KL_SHIM_IDX_SLOTS 2048      // power of two; ~650 rows -> 0.32 load
-typedef struct { const char *name; void *fn; } kl_shim_idx_ent;
+typedef kl_entry kl_shim_idx_ent;
 static kl_shim_idx_ent g_shim_idx[KL_SHIM_IDX_SLOTS];
 static int g_shim_idx_ok;           // 1 once built and self-checked
 static pthread_once_t g_shim_idx_once = PTHREAD_ONCE_INIT;

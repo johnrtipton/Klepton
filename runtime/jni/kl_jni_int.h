@@ -63,21 +63,9 @@ typedef struct {
     const char *cls;
     char        name[160], sig[224];
     char        kind;   // m=method M=static method f=field F=static field
-    // The resolved host binding, cached on first call (see klj_call_common).
-    // `b_cache` distinguishes "not resolved yet" (0) from "resolved, none
-    // exists" (1 = KLJ_BINDING_NONE below); `b` is the binding otherwise. The
-    // table is only ever appended to and an entry's identity never changes, so
-    // resolving once is exact — and it turns the per-call walk of every family
-    // table into one pointer load. Benched: jni_call 798 -> ~35 ns/op
-    // (tests/t_perf.c).
+    // Binding tables are immutable; NULL also caches an absent binding.
     const struct klj_binding *b;
-    int         b_cache;
 } klj_wanted;
-
-// Sentinel for "resolved, no implementation" — stored in b_cache so the
-// (comparatively cheap) resolution is not repeated for the many ids a guest
-// looks up and never calls.
-#define KLJ_BINDING_NONE 1
 
 // The two object kinds the host constructs rather than merely hands back: a
 // bitter/jnibridge proxy, and the java.lang.reflect.Method describing what to

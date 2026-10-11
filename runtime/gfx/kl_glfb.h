@@ -94,8 +94,9 @@ void kl_glfb_report_formats(void);
 void kl_glfb_gl_census(FILE *f);
 
 // Where the guest's draws actually landed: one row per (framebuffer, thread),
-// with the colour attachment the framebuffer last carried. Always collected,
-// and the first thing to read when a picture is missing — "the eye texture is
+// with the colour attachment the framebuffer last carried. Collected with
+// KL_GLFB_DRAW_CENSUS=1, KL_GL_CENSUS>0 or KL_GLFB_BLIT_PROBE=1,
+// the first thing to read when a picture is missing — "the eye texture is
 // black" and "the guest never drew into the eye texture" are the same symptom
 // and completely different work.
 void kl_glfb_draw_census(FILE *f);

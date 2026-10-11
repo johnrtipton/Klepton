@@ -116,7 +116,12 @@ answers GL and kl_glfb never initializes.
   a line naming every release of 16 MiB or more. Every gen/delete goes
   straight to ANGLE, so this is the only thing at the seam that can say
   whether the guest's GL objects come back — the first question when memory
-  climbs across scene loads. Unset = off, and costs nothing.
+  climbs across scene loads. Also enables the per-draw framebuffer/thread
+  census. Unset = off.
+- `KL_GLFB_DRAW_CENSUS=1` — collect draw counts by framebuffer and thread
+  for the exit report without enabling the object census. This queries the
+  current draw framebuffer on every draw. It is off by default, and also
+  enabled by `KL_GL_CENSUS>0` or `KL_GLFB_BLIT_PROBE=1`. Set before launch.
 - `KL_EYE_RELEASE=0` — do *not* release an eye texture when
   `ovrp_DestroyEyeTexture` says to (the pre-2026-08-09 behaviour, which leaked
   a whole swapchain — 250-380 MiB — per loading transition). The A/B for that
@@ -130,7 +135,8 @@ answers GL and kl_glfb never initializes.
 - `KL_GLFB_ERRPROBE=1` — bracket draws and blits with `glGetError` and print
   the first 20 with the state around them (draw FBO, program, viewport;
   `glCheckFramebufferStatus` on 0x506). Consumes the pending error. Also
-  enables the blit-state log line.
+  enables the blit-state log line. The flag is latched on first use; set before
+  launch. Disabled draw probes avoid diagnostic argument formatting.
 - `KL_GLFB_DRAW_PROBE=1` — after each of the first 12 scene-sized draws (32+
   vertices), read back the centre 64x64 and report lit-pixel count and mean
   luma. `KL_GLFB_DRAW_PROBE_N` overrides the quota (0 = unlimited),

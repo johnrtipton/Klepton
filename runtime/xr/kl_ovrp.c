@@ -69,7 +69,7 @@ static int ovrp_slot_lookup(const char *name) {
         if (!n) return -1;                      // empty slot ends the run
         if (strcmp(n, name) == 0)
             return (int)__atomic_load_n(&g_ovrp_idx[(h + probe) & (KL_OVRP_IDX_SLOTS - 1)].slot,
-                                        __ATOMIC_ACQUIRE);
+                                        __ATOMIC_RELAXED);
     }
     return -1;
 }
@@ -86,13 +86,13 @@ static int ovrp_slot(const char *name) {
     g_ovrp[g_novrp].name = strdup(name);
     g_ovrp[g_novrp].calls = 0;
     rc = (int)g_novrp++;
-    {   // publish the index entry: name first, then the slot, release-ordered
+    {   // publish the index entry: slot first, then the name with release ordering
         uint32_t h = ovrp_hash(g_ovrp[rc].name);
         for (uint32_t probe = 0; probe < KL_OVRP_IDX_SLOTS; probe++) {
             unsigned k = (h + probe) & (KL_OVRP_IDX_SLOTS - 1);
             if (!__atomic_load_n(&g_ovrp_idx[k].name, __ATOMIC_RELAXED)) {
-                __atomic_store_n(&g_ovrp_idx[k].name, g_ovrp[rc].name, __ATOMIC_RELAXED);
-                __atomic_store_n(&g_ovrp_idx[k].slot, (unsigned)rc, __ATOMIC_RELEASE);
+                __atomic_store_n(&g_ovrp_idx[k].slot, (unsigned)rc, __ATOMIC_RELAXED);
+                __atomic_store_n(&g_ovrp_idx[k].name, g_ovrp[rc].name, __ATOMIC_RELEASE);
                 break;
             }
         }
