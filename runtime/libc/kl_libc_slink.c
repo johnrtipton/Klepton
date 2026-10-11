@@ -360,7 +360,11 @@ int klb_epoll_ctl(int epfd, int op, int fd, void *ev) {
 
 int klb_epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
     if (maxevents <= 0) { errno = EINVAL; return -1; }
-    struct kevent *kev = calloc((size_t)maxevents, sizeof *kev);
+    // Polling is frequent on the streaming/input threads. kevent fills only
+    // the returned entries, so neither zeroing nor allocation is needed for
+    // the common bounded batch. Large batches retain the old heap fallback.
+    struct kevent local[64];
+    struct kevent *kev = maxevents <= 64 ? local : calloc((size_t)maxevents, sizeof *kev);
     if (!kev) { errno = ENOMEM; return -1; }
     struct timespec ts, *tsp = NULL;
     if (timeout_ms >= 0) {
@@ -369,7 +373,7 @@ int klb_epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
         tsp = &ts;
     }
     int r = kevent(epfd, NULL, 0, kev, maxevents, tsp);
-    if (r < 0) { free(kev); return -1; }
+    if (r < 0) { if (kev != local) free(kev); return -1; }
 
     // kqueue reports one event per (fd, filter); epoll reports one per fd with
     // the directions OR'd. Collapsing them matters: a caller that sees the same
@@ -387,7 +391,7 @@ int klb_epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
         for (; j < n; j++) if (out[j].data == data) { out[j].events |= bits; break; }
         if (j == n) { out[n].events = bits; out[n].__pad = 0; out[n].data = data; n++; }
     }
-    free(kev);
+    if (kev != local) free(kev);
     return n;
 }
 

@@ -552,11 +552,31 @@ perf: build/t_perf
 # (scratch/perf 00-MASTER item 1) is claimed to buy — the A/B in one command.
 build/t_perf_O2: tests/t_perf.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
-	$(CC) $(filter-out -O1,$(CFLAGS)) -O2 -o $@ tests/t_perf.c $(RUNTIME) $(LDLIBS)
+	$(CC) $(filter-out -O%,$(CFLAGS)) -O2 -o $@ tests/t_perf.c $(RUNTIME) $(LDLIBS)
 
 .PHONY: perf-O2
 perf-O2: build/t_perf_O2
 	./build/t_perf_O2
+
+# Actual converter, tested without an output AudioUnit. Includes kl_audio.c
+# in the test TU to exercise private carry state without a shipping test ABI.
+build/t_audio_convert: tests/t_audio_convert.c runtime/media/kl_audio.c runtime/kl_env.c $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_audio_convert.c runtime/kl_env.c $(LDLIBS)
+
+build/t_perf_safety: tests/t_perf_safety.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_perf_safety.c $(filter-out runtime/xr/kl_ovrp.c,$(RUNTIME)) $(LDLIBS)
+
+.PHONY: check-host
+check-host: build/t_variadic build/t_fault build/t_haptics build/t_softinput build/t_xrspace build/t_xrinput build/t_trace build/t_ctr build/t_bcast build/t_hevc build/t_audio_convert build/t_perf_safety
+	@set -e; for t in t_variadic t_fault t_haptics t_softinput t_xrspace t_xrinput t_trace t_ctr t_bcast t_hevc t_audio_convert t_perf_safety; do \
+	  ./build/$$t > build/$$t.host.log 2>&1 || { cat build/$$t.host.log; exit 1; }; \
+	  echo "$$t: PASS"; done
+
+.PHONY: check-host-O2
+check-host-O2:
+	$(MAKE) -B check-host CFLAGS='$(filter-out -O%,$(CFLAGS)) -O2'
 
 # Full regression sweep — run this first when picking work back up.
 #
@@ -760,7 +780,7 @@ XROS_LIBS  := $(foreach p,$(XROS_PLATFORMS),build/$(p)/libklepton.a)
 # fails; a Vulkan guest simply reports that the hardware does not meet its
 # requirements, on device only). Nothing links against MoltenVK either way —
 # kl_vulkan.c is VK_NO_PROTOTYPES and dlopens it — so this is headers only.
-XROS_CFLAGS := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
+XROS_CFLAGS := -g -O2 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
 
 .PHONY: xros xros-device xros-sim swiftcheck
 xros: $(XROS_GATES) build/Klepton.xcframework swiftcheck
@@ -803,7 +823,7 @@ swiftcheck:
 # runs the PREVIOUS constant while the source says otherwise. That is the same
 # stale-artifact trap the xcframework rule below already records; the fix there
 # stopped at the archives and left this behind it.
-build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
+build/xros/libklepton.a: Makefile $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
 	@mkdir -p build/xros
 	@rm -f $@
 	@for s in $(RUNTIME_SHIP); do \
@@ -812,7 +832,7 @@ build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
 	    -c $$s -o $$o || exit 1; done
 	@ar rcs $@ build/xros/*.o
 
-build/xrsim/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
+build/xrsim/libklepton.a: Makefile $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
 	@mkdir -p build/xrsim
 	@rm -f $@
 	@for s in $(RUNTIME_SHIP); do \

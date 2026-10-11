@@ -354,9 +354,13 @@ static struct { _Atomic(void *) tid, cond, guest, ra; } g_cnd_sleepers[64];
 // every lock HOLDER under default settings. What is lost by default is only
 // the WAITER census — who is queued behind whom.
 static int px_wait_track(void) {
-    static int on = -1;
-    if (on < 0) on = kl_env_on("KL_TRACE_MTXWAIT", 0);
-    return on;
+    static _Atomic int on = -1;
+    int value = atomic_load_explicit(&on, memory_order_relaxed);
+    if (value < 0) {
+        value = kl_env_on("KL_TRACE_MTXWAIT", 0);
+        atomic_store_explicit(&on, value, memory_order_relaxed);
+    }
+    return value;
 }
 int kl_pthread_wait_census_enabled(void) { return px_wait_track(); }
 
