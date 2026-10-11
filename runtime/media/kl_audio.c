@@ -577,6 +577,24 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
     double pos = g_pos;
     size_t produced = 0;
 
+    // The steady state, and by far the commonest one: the guest's rate IS the
+    // device rate and both sides are stereo, so resampling is a pure
+    // int16->float conversion of n frames. This used to run the general loop
+    // below through the FETCH macro — a floor(), a double add and two clamped
+    // per-channel loads per frame — for what is a flat scale. Same output
+    // bit-for-bit (the interpolation weight is 0 at ratio 1, so FETCH's i+1
+    // read is discarded), and it is the case every 48 kHz guest hits on every
+    // buffer.
+    if (ich == 2 && och == 2 && ratio == 1.0 && pos == 0.0 && n > 0 && n <= max_out) {
+        const float k = 1.0f / 32768.0f;
+        for (size_t i = 0; i < n * 2; i++) dst[i] = (float)src[i] * k;
+        g_prev[0] = dst[(n - 1) * 2];
+        g_prev[1] = dst[(n - 1) * 2 + 1];
+        g_pos = 0.0;
+        *out = dst;
+        return n;
+    }
+
     // The frame fetch folds channel mapping in: mono fans out, anything wider
     // than stereo keeps the first two channels. Unity's FMOD has only ever
     // asked for stereo, so the other paths are correctness, not tuning.

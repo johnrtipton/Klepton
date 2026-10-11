@@ -2255,10 +2255,87 @@ void *(*kl_shim_override)(const char *name);
 static kl_image *g_guest_gl;
 void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 
+// ---- the table index ----------------------------------------------------
+//
+// g_shim is a flat array of ~650 rows and a lookup used to be a linear strcmp
+// walk of all of them. That was affordable while lookups only happened at load
+// — but they also happen per dlsym (kl_dl.c) and, on the fault-driven lazy
+// path, per unresolved call, and the walk measured 715 ns for a HIT and
+// 1542 ns for a MISS (tests/t_perf.c). A lookup is a name -> fn map, so it
+// gets a map: an open-addressed index over the same rows, built once.
+//
+// Built by re-scanning the table on first use (the table is `static const`, so
+// an index computed from it is valid forever). The index only ever points at
+// rows; the rows stay the only source of truth, and the linear scan is kept as
+// the fallback for a name the index does not carry — so a probe bug degrades
+// to the old cost (and a startup self-check catches it, below) rather than to
+// a wrong answer.
+#define KL_SHIM_IDX_SLOTS 2048      // power of two; ~650 rows -> 0.32 load
+typedef struct { const char *name; void *fn; } kl_shim_idx_ent;
+static kl_shim_idx_ent g_shim_idx[KL_SHIM_IDX_SLOTS];
+static int g_shim_idx_ok;           // 1 once built and self-checked
+static pthread_once_t g_shim_idx_once = PTHREAD_ONCE_INIT;
+
+static uint32_t shim_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+static const kl_entry *shim_idx_find(const char *name) {
+    if (!g_shim_idx_ok) return NULL;
+    uint32_t h = shim_hash(name);
+    for (uint32_t probe = 0; probe < KL_SHIM_IDX_SLOTS; probe++) {
+        const kl_shim_idx_ent *e = &g_shim_idx[(h + probe) & (KL_SHIM_IDX_SLOTS - 1)];
+        if (!e->name) return NULL;                    // empty slot ends the run
+        if (strcmp(e->name, name) == 0) return (const kl_entry *)e;
+    }
+    return NULL;
+}
+
+static void shim_idx_build(void) {
+    size_t n = sizeof g_shim / sizeof g_shim[0];
+    for (size_t i = 0; i < n; i++) {
+        uint32_t h = shim_hash(g_shim[i].name);
+        for (uint32_t probe = 0; probe < KL_SHIM_IDX_SLOTS; probe++) {
+            kl_shim_idx_ent *e = &g_shim_idx[(h + probe) & (KL_SHIM_IDX_SLOTS - 1)];
+            if (!e->name) { e->name = g_shim[i].name; e->fn = g_shim[i].fn; break; }
+            if (strcmp(e->name, g_shim[i].name) == 0) break;   // duplicate row
+        }
+    }
+    // Self-check: every row must be findable through the index. If one is not
+    // — a table that outgrew the slots, say — the index is discarded and the
+    // linear scan carries on, which is the pre-existing behaviour.
+    for (size_t i = 0; i < n; i++) {
+        const kl_entry *e = NULL;
+        uint32_t h = shim_hash(g_shim[i].name);
+        for (uint32_t probe = 0; probe < KL_SHIM_IDX_SLOTS; probe++) {
+            const kl_shim_idx_ent *c = &g_shim_idx[(h + probe) & (KL_SHIM_IDX_SLOTS - 1)];
+            if (!c->name) break;
+            if (strcmp(c->name, g_shim[i].name) == 0) { e = (const kl_entry *)c; break; }
+        }
+        if (!e || e->fn != g_shim[i].fn) {
+            fprintf(stderr, "  [shim] the lookup index failed its self-check on "
+                            "'%s' — falling back to the linear scan\n",
+                    g_shim[i].name);
+            memset(g_shim_idx, 0, sizeof g_shim_idx);
+            return;
+        }
+    }
+    g_shim_idx_ok = 1;
+}
+
 void *kl_shim_lookup(const char *name) {
     if (kl_shim_override) { void *o = kl_shim_override(name); if (o) return o; }
-    for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
-        if (strcmp(g_shim[i].name, name) == 0) return g_shim[i].fn;
+    pthread_once(&g_shim_idx_once, shim_idx_build);
+    const kl_entry *hit = shim_idx_find(name);
+    if (hit) return hit->fn;
+    // The index missed — either it is off (self-check failed) or the name is
+    // genuinely not in the table. Only the first case needs the linear walk, so
+    // the miss path asks which it is.
+    if (!g_shim_idx_ok)
+        for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
+            if (strcmp(g_shim[i].name, name) == 0) return g_shim[i].fn;
     // Tier 4: the NDK surface lives in its own table — it is a different
     // API family with its own lifetimes, not more bionic libc.
     void *ndk = kl_ndk_lookup(name);

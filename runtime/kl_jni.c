@@ -1078,7 +1078,22 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
         KLJ_LOG("WARNING %s.%s%s called through a '%c' slot but returns '%c'",
                 w->cls, w->name, w->sig, want, have);
 
-    const klj_binding *b = klj_resolve_binding(w->cls, w->name, w->sig);
+    // Resolved ONCE per jmethodID and cached on the interned entry. The
+    // resolution walks every family table (614-odd rows, two strcmps each) per
+    // superclass hop — fine once per id, pure overhead per call, and this is
+    // the per-call path for every Java method a guest invokes. Ids are
+    // interned and immutable, so a cached answer cannot go stale. The store is
+    // a plain pointer write: two threads racing to resolve the same id compute
+    // the same value, so no lock is needed and neither can observe a wrong one
+    // (the entry is written before the slot address is ever handed out).
+    const klj_binding *b = w->b;
+    if (w->b_cache == 0) {
+        b = klj_resolve_binding(w->cls, w->name, w->sig);
+        w->b = b;
+        w->b_cache = b ? 2 : KLJ_BINDING_NONE;
+    } else if (w->b_cache == KLJ_BINDING_NONE) {
+        b = NULL;
+    }
     if (b) {
         klj_val argv[KLJ_MAX_ARGS];
         int argc = va ? klj_decode_args(w->sig, va, argv)

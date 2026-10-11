@@ -5331,7 +5331,10 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // out of one array texture, so it can show exactly one projection layer.
     // Layering the rest (their own quads, depths, submission order) is real work
     // for later; until then the topmost is the closest single-layer answer.
-    int env_cap = kl_env_int("KL_XR_CAPTURE_LAYER", -1);
+    // Latched: read once, not per xrEndFrame — one environ walk per frame to
+    // answer a knob that is fixed at launch.
+    static int env_cap = -2;
+    if (env_cap == -2) env_cap = kl_env_int("KL_XR_CAPTURE_LAYER", -1);
     // Pre-pass over the projection layers, so "which one" has an answer before
     // the loop that walks them. Two facts per layer, by its running index:
     // whether it exists at all, and its horizontal field of view — because

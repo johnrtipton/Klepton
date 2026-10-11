@@ -394,18 +394,29 @@ static void mprobe_resolve_offsets(void) {
 }
 
 void kl_mprobe_tick(unsigned frame) {
+    // Called once per guest frame. Every knob below is read ONCE, latched, for
+    // exactly that reason: these guards used to re-read the environment on
+    // every frame forever — the `!st_done` latch only closes when the probe
+    // actually RUNS, so with the knobs unset (the normal case) all three
+    // getenv walks ran for the whole session, on the frame path.
+    static int st_on = -1, rs_on = -1, xr_on = -1;
+    if (st_on < 0) {
+        st_on = kl_env_str("KL_PROBE_STACKTRACE", NULL) != NULL;
+        rs_on = kl_env_str("KL_PROBE_RESOLVE",    NULL) != NULL;
+        xr_on = kl_env_str("KL_PROBE_XR",         NULL) != NULL;
+    }
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
     // first frame. It runs once, on the first tick that finds IL2CPP up.
     static int st_done;
-    if (!st_done && kl_env_str("KL_PROBE_STACKTRACE", NULL) && mprobe_init()) {
+    if (!st_done && st_on && mprobe_init()) {
         st_done = 1;
         probe_stack_traces();
     }
     // pc->method naming, once, late enough that the game's assemblies are all
     // loaded (frame 600 ~= ten seconds in).
     static int rs_done;
-    if (!rs_done && frame >= 600 && kl_env_str("KL_PROBE_RESOLVE", NULL) && mprobe_init()) {
+    if (!rs_done && frame >= 600 && rs_on && mprobe_init()) {
         rs_done = 1;
         mprobe_resolve_offsets();
     }
@@ -413,7 +424,7 @@ void kl_mprobe_tick(unsigned frame) {
     // is settled long before KL_PROBE_FROM's default, and reading XRSettings
     // runs no cctor the guest has not already run.
     static unsigned xr_from, xr_every;
-    if (kl_env_str("KL_PROBE_XR", NULL)) {
+    if (xr_on) {
         if (!xr_every) {
             xr_from  = kl_env_uint("KL_PROBE_XR_FROM", 60u);
             xr_every = kl_env_uint("KL_PROBE_XR_EVERY", 300u);

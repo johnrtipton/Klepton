@@ -54,6 +54,8 @@ typedef struct { char name[224]; klj_object *as_object; } klj_class;
 
 typedef struct { const char *cls, *name, *sig; void *fn; } klj_native;
 
+struct klj_binding;   // defined below; the id caches its resolution
+
 // Every method/field id the guest asked for. The address of an entry IS the
 // jmethodID/jfieldID handed back, so identity is (class, name, signature) —
 // exactly what JNI guarantees.
@@ -61,7 +63,21 @@ typedef struct {
     const char *cls;
     char        name[160], sig[224];
     char        kind;   // m=method M=static method f=field F=static field
+    // The resolved host binding, cached on first call (see klj_call_common).
+    // `b_cache` distinguishes "not resolved yet" (0) from "resolved, none
+    // exists" (1 = KLJ_BINDING_NONE below); `b` is the binding otherwise. The
+    // table is only ever appended to and an entry's identity never changes, so
+    // resolving once is exact — and it turns the per-call walk of every family
+    // table into one pointer load. Benched: jni_call 798 -> ~35 ns/op
+    // (tests/t_perf.c).
+    const struct klj_binding *b;
+    int         b_cache;
 } klj_wanted;
+
+// Sentinel for "resolved, no implementation" — stored in b_cache so the
+// (comparatively cheap) resolution is not repeated for the many ids a guest
+// looks up and never calls.
+#define KLJ_BINDING_NONE 1
 
 // The two object kinds the host constructs rather than merely hands back: a
 // bitter/jnibridge proxy, and the java.lang.reflect.Method describing what to
@@ -99,7 +115,7 @@ typedef struct { void *addr; int64_t capacity; } klj_direct_buffer;
 
 typedef union { uint64_t j; double d; void *l; } klj_val;
 typedef klj_val (*klj_impl)(void *env, void *self, const klj_val *argv, int argc);
-typedef struct { const char *cls, *name, *sig; klj_impl fn; } klj_binding;
+typedef struct klj_binding { const char *cls, *name, *sig; klj_impl fn; } klj_binding;
 
 // The `A` calling convention: arguments arrive as an array of jvalue unions.
 // Each jvalue is 8 bytes but a narrow type writes only its own width, so the

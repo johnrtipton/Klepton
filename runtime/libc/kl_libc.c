@@ -1118,11 +1118,31 @@ void kl_mem_pressure_fire(const char *why) {
             (unsigned long long)(kl_mem_total() >> 20), (unsigned long long)n);
 }
 
-// Cheap enough for once a frame: one task_info call.
+// Once a frame, from kl_driver_frame — so everything in here is per-frame cost,
+// and it used to be three uncached getenv walks (each a linear scan of environ)
+// plus a headroom query, every frame, to answer questions whose answers cannot
+// change while the process runs. The knobs latch; the queries are rate-limited.
 void kl_mem_pressure_poll(void) {
-    int at = kl_env_int("KL_LOWMEM_AT", 80);
+    static int at = -2, clear = -2;
+    if (at == -2) {
+        at    = kl_env_int("KL_LOWMEM_AT", 80);
+        clear = kl_env_int("KL_LOWMEM_CLEAR", 70);
+    }
     if (at <= 0) return;
-    int clear = kl_env_int("KL_LOWMEM_CLEAR", 70);
+
+    // The watermark is a memory-pressure signal, not an animation: the OS
+    // moves it at human timescales, so sampling it at the frame rate buys
+    // nothing but an os_proc_available_memory() call per frame. 4 Hz is
+    // well inside the notification latency this exists for and matches the
+    // dispatch_source arm beside it, which is where a real transition is
+    // announced promptly anyway.
+    static _Atomic uint64_t next_ns;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+    uint64_t due = atomic_load(&next_ns);
+    if (now_ns < due) return;
+    atomic_store(&next_ns, now_ns + 250000000ull);      // next sample 250 ms out
 
     // The real limit first: os_proc_available_memory() is the headroom before
     // jetsam, and on visionOS the app is killed at a phys_footprint well under
@@ -1132,7 +1152,8 @@ void kl_mem_pressure_poll(void) {
     // Unity runs UnloadUnusedAssets before the kill rather than after it.
     uint64_t avail = kl_proc_available();
     if (avail) {
-        uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
+        static uint64_t floor;
+        if (!floor) floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
         uint64_t clearf = floor + (floor >> 1);          // re-arm at 1.5x the floor
         if (avail <= floor) {
             if (atomic_exchange(&g_lowmem_armed, 0)) kl_mem_pressure_fire("headroom");

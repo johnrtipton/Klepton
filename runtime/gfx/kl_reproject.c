@@ -102,11 +102,19 @@ static int klr_translate(void) {
 // across two pairings) is the difference between settling it and arguing.
 static int g_srgb_decode;
 
+// Latched on first use: kl_reproject_srgb_decode() is called per eye per frame
+// (and per overlay), and this used to be a raw getenv for every one of them.
+// The knob is a launch-time override; kl_reproject_set_srgb_decode() below is
+// the live-toggle seam, so latching costs nothing that mattered.
 static int klr_srgb_forced(int *out) {
-    const char *e = getenv("KL_SRGB_DECODE");
-    if (!e || !*e) return 0;
-    *out = kl_env_on("KL_SRGB_DECODE", 0);
-    return 1;
+    static int forced = -1, val = 0;
+    if (forced < 0) {
+        const char *e = getenv("KL_SRGB_DECODE");
+        forced = (e && *e) ? 1 : 0;
+        if (forced) val = kl_env_on("KL_SRGB_DECODE", 0);
+    }
+    if (out) *out = val;
+    return forced;
 }
 
 void kl_reproject_set_srgb_decode(int on) {
@@ -939,14 +947,18 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     // states. Baked into uv_rect (start at the right edge, walk back with a
     // negative width) so no shader or struct change is needed. Off by default so
     // no other target regresses; promoted per-target once confirmed.
-    if (kl_env_on("KL_OVERLAY_FLIP_X", 0)) {
+    static int flip_x = -1, flip_y = -1, opaque = -1;
+    if (flip_x  < 0) flip_x  = kl_env_on("KL_OVERLAY_FLIP_X", 0);
+    if (flip_y  < 0) flip_y  = kl_env_on("KL_OVERLAY_FLIP_Y", 0);
+    if (opaque  < 0) opaque  = kl_env_on("KL_OVERLAY_OPAQUE", 0);
+    if (flip_x) {
         u.uv_rect.x += u.uv_rect.z;
         u.uv_rect.z  = -u.uv_rect.z;
     }
     // KL_OVERLAY_FLIP_Y: mirror the sampled V, independent of the shader's own
     // flip_y (which tracks origin_top_left). AC Nexus's panels come in 180-degree
     // rotated, so the readable result is FLIP_X + FLIP_Y together.
-    if (kl_env_on("KL_OVERLAY_FLIP_Y", 0)) {
+    if (flip_y) {
         u.uv_rect.y += u.uv_rect.w;
         u.uv_rect.w  = -u.uv_rect.w;
     }
@@ -965,7 +977,7 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     u.srgb_decode = (uint32_t)kl_reproject_srgb_decode();
     u.flip_y = ov->origin_top_left ? 1u : 0u;
     u.visible = 1;
-    u.opaque = kl_env_on("KL_OVERLAY_OPAQUE", 0) ? 1u : 0u;
+    u.opaque = opaque ? 1u : 0u;
     return u;
 }
 
