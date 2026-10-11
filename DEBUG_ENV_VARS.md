@@ -657,6 +657,18 @@ m_boot's fault handler on every fatal path:
   address, slot/map index, tid, return address). How the slot-23 double-init
   was caught.
 
+- `KL_TRACE_MTXWAIT=1` — collect the **waiter census**: which guest thread is
+  queued behind which mutex, asleep in which condvar, or parked in which
+  semaphore wait. **Off by default**, and that is a performance decision with a
+  diagnostic price (see `scratch/perf/PERF-BENCH.md`): claiming a waiter slot is
+  a CAS scan over a 64-entry table shared by every thread, taken on every guest
+  mutex lock/unlock, every cond wait and every sem wait — measured at 2.2× on
+  the contended lock path (`make perf`). With the knob off the report still
+  names every lock HOLDER and its stacks, plus the cond `signals` counters
+  (cheap atomics); what it loses is only the queued-behind-whom half, and it
+  prints a line saying so rather than an empty census. Turn it on when chasing
+  a hang; leave it off for a perf run.
+
 ## Guest-thread sampler (`runtime/diag/kl_sample.c`, `runtime/guest/kl_il2cpp.c`)
 
 Built to name the loop the loading-pace arc kept measuring: samples every

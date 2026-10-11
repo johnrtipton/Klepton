@@ -335,7 +335,33 @@ static struct { _Atomic(void *) tid, guest, ra; } g_mtx_waiters[64];
 // boot open, invisible.
 static struct { _Atomic(void *) tid, cond, guest, ra; } g_cnd_sleepers[64];
 
+// **The census is OPT-IN (KL_TRACE_MTXWAIT=1), and that is a performance
+// decision with a diagnostic price, stated rather than hidden.**
+//
+// Both tables are claimed by a CAS scan over 64 shared slots on EVERY mutex
+// lock and unlock and every cond wait a guest performs, from every thread —
+// the one place in this file where guest threads contend on memory that is not
+// the guest's own. Unity's job system makes thousands of such calls a second,
+// and the cost lands on the paths that decide whether frames make their
+// deadline (tests/t_perf.c measures it as mtx_uncontended/mtx_contended).
+//
+// With the knob off, kl_pthread_report says the census is disabled instead of
+// printing an empty one — a report that silently answers "nobody is blocked"
+// would be worse than either.
+//
+// The owner/depth/locksite fields in the mutex MAP stay unconditional: they
+// are per-entry atomics with no cross-thread scan, so the report still names
+// every lock HOLDER under default settings. What is lost by default is only
+// the WAITER census — who is queued behind whom.
+static int px_wait_track(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_TRACE_MTXWAIT", 0);
+    return on;
+}
+int kl_pthread_wait_census_enabled(void) { return px_wait_track(); }
+
 static void cnd_sleep_enter(void *c, void *guest, void *ra) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = NULL;
@@ -376,6 +402,7 @@ static void cnd_wait_failed(int err, void *c, void *m, void *ra, void *was) {
 }
 
 static void cnd_sleep_leave(void) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = self;
@@ -385,6 +412,7 @@ static void cnd_sleep_leave(void) {
 }
 
 static void mtx_wait_enter(void *guest, void *ra) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = NULL;
@@ -396,6 +424,7 @@ static void mtx_wait_enter(void *guest, void *ra) {
     }
 }
 static void mtx_wait_leave(void) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = self;
@@ -411,6 +440,7 @@ static void mtx_wait_leave(void) {
 // of every blocking sem wait; the watchdog dumps whoever is still parked.
 static struct { _Atomic(void *) tid, guest, ra; } g_sem_waiters[64];
 static void sem_wait_enter(void *guest, void *ra) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = NULL;
@@ -422,6 +452,7 @@ static void sem_wait_enter(void *guest, void *ra) {
     }
 }
 static void sem_wait_leave(void) {
+    if (!px_wait_track()) return;
     void *self = (void *)pthread_self();
     for (int i = 0; i < 64; i++) {
         void *expect = self;
@@ -460,10 +491,13 @@ static void *cnd_watchdog(void *arg) {
             if (stuck || shown < 24) {
                 void *ra  = atomic_load(&g_cnd_map[i].waiter_ra);
                 void *ra2 = atomic_load(&g_cnd_map[i].waiter_ra2);
+                char agebuf[48];
+                if (ls) snprintf(agebuf, sizeof agebuf, "%.1fs", age);
+                else    snprintf(agebuf, sizeof agebuf, "n/a (KL_TRACE_MTXWAIT=0)");
                 fprintf(stderr, "  [cnd] %#llx waiters=%d signals=%llu "
-                        "last_signal=%.1fs waiter_ra=%p caller=%p%s\n",
+                        "last_signal=%s waiter_ra=%p caller=%p%s\n",
                         (unsigned long long)atomic_load(&g_cnd_map[i].key), w,
-                        (unsigned long long)sig, age, ra, ra2,
+                        (unsigned long long)sig, agebuf, ra, ra2,
                         stuck ? "   <== STUCK (no wake coming)" : "");
             }
             shown++;
@@ -705,6 +739,9 @@ void kl_pthread_report(FILE *out) {
         shown++;
     }
     if (!shown) fprintf(out, "  (no tracked holders)\n");
+    if (!kl_pthread_wait_census_enabled())
+        fprintf(out, "  (waiter census disabled — KL_TRACE_MTXWAIT=1 collects "
+                     "who is queued behind whom; holders above are still tracked)\n");
     for (int i = 0; i < 64; i++) {
         void *tid = atomic_load(&g_mtx_waiters[i].tid);
         if (!tid) continue;
@@ -754,16 +791,21 @@ int klb_pthread_mutexattr_settype(int *a, int t)  { *a = t; return 0; }
 // already waiting on it.
 int klb_pthread_cond_init(void *c, const void *a)  { (void)a; cnd(c); return 0; }
 int klb_pthread_cond_destroy(void *p) { (void)p; return 0; }
+// The `signals` counter is one atomic add and stays unconditional — it is what
+// distinguishes "nobody signals this cond" from "the signal lands on another
+// host cond", and it costs nothing. `last_sig_ns` is a clock read per signal
+// and rides the same opt-in as the waiter census (see px_wait_track): the
+// "signals climbing vs frozen" reading only exists in a census-enabled run.
 int klb_pthread_cond_signal(void *c) {
     cnd_entry *ce = cnd_entry_for(c);
     atomic_fetch_add(&ce->signals, 1);
-    atomic_store(&ce->last_sig_ns, cnd_now_ns());
+    if (px_wait_track()) atomic_store(&ce->last_sig_ns, cnd_now_ns());
     return px(pthread_cond_signal(cnd_host(ce)));
 }
 int klb_pthread_cond_broadcast(void *c) {
     cnd_entry *ce = cnd_entry_for(c);
     atomic_fetch_add(&ce->signals, 1);
-    atomic_store(&ce->last_sig_ns, cnd_now_ns());
+    if (px_wait_track()) atomic_store(&ce->last_sig_ns, cnd_now_ns());
     return px(pthread_cond_broadcast(cnd_host(ce)));
 }
 // Validated one-record frame walk — see klepton.h. `my_frame` is the caller's

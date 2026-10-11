@@ -35,25 +35,78 @@ static unsigned g_novrp;
 // NULL name for a later strcmp — observed as SIGSEGV inside ovrp_hit.
 static pthread_mutex_t g_ovrp_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// ---- the slot index ------------------------------------------------------
+//
+// ovrp_slot used to be a linear strcmp walk of g_ovrp, under the mutex, on
+// EVERY instrumented entry-point call — and the walk grows with the number of
+// distinct names the guest has touched, which for a Unity title resolving its
+// OVRPlugin surface is dozens to hundreds. Measured (tests/t_perf.c): 14 ns/op
+// against a table of one, 70 ns/op against fifty, and it only gets worse.
+// The counters are diagnostics; they must not be a tax on the calls they
+// count.
+//
+// An open-addressed index over the same rows, keyed by name CONTENT (the same
+// entry point arrives as a literal from ovrp_hit's call sites and as a
+// strdup'd copy from kl_ovrp_sym, so pointer identity alone would not unify
+// them). Entries are written once under g_ovrp_mu and never modified, so a
+// reader can find them lock-free with acquire loads; only a miss takes the
+// mutex to insert.
+#define KL_OVRP_IDX_SLOTS 2048                  // power of two; 512 rows max
+static struct { const char *name; unsigned slot; } g_ovrp_idx[KL_OVRP_IDX_SLOTS];
+
+static uint32_t ovrp_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+// Lock-free: returns the slot for `name`, or -1 when it is not indexed yet.
+static int ovrp_slot_lookup(const char *name) {
+    uint32_t h = ovrp_hash(name);
+    for (uint32_t probe = 0; probe < KL_OVRP_IDX_SLOTS; probe++) {
+        const char *n = __atomic_load_n(&g_ovrp_idx[(h + probe) & (KL_OVRP_IDX_SLOTS - 1)].name,
+                                        __ATOMIC_ACQUIRE);
+        if (!n) return -1;                      // empty slot ends the run
+        if (strcmp(n, name) == 0)
+            return (int)__atomic_load_n(&g_ovrp_idx[(h + probe) & (KL_OVRP_IDX_SLOTS - 1)].slot,
+                                        __ATOMIC_ACQUIRE);
+    }
+    return -1;
+}
+
+static int ovrp_slot(const char *name) {
+    int hit = ovrp_slot_lookup(name);
+    if (hit >= 0) return hit;
+
+    pthread_mutex_lock(&g_ovrp_mu);
+    int rc = -1;
+    hit = ovrp_slot_lookup(name);               // someone may have inserted it
+    if (hit >= 0) { rc = hit; goto out; }
+    if (g_novrp >= KL_OVRP_MAX) goto out;
+    g_ovrp[g_novrp].name = strdup(name);
+    g_ovrp[g_novrp].calls = 0;
+    rc = (int)g_novrp++;
+    {   // publish the index entry: name first, then the slot, release-ordered
+        uint32_t h = ovrp_hash(g_ovrp[rc].name);
+        for (uint32_t probe = 0; probe < KL_OVRP_IDX_SLOTS; probe++) {
+            unsigned k = (h + probe) & (KL_OVRP_IDX_SLOTS - 1);
+            if (!__atomic_load_n(&g_ovrp_idx[k].name, __ATOMIC_RELAXED)) {
+                __atomic_store_n(&g_ovrp_idx[k].name, g_ovrp[rc].name, __ATOMIC_RELAXED);
+                __atomic_store_n(&g_ovrp_idx[k].slot, (unsigned)rc, __ATOMIC_RELEASE);
+                break;
+            }
+        }
+    }
+out:
+    pthread_mutex_unlock(&g_ovrp_mu);
+    return rc;
+}
+
 // name -> the pointer we handed the guest, so a guest function table can be
 // read back by name (see klovrp_dump_vrdevice).
 static struct { const char *name; void *ptr; } g_sym[KL_OVRP_MAX];
 static unsigned g_nsym;
 static void *kl_ovrp_sym_inner(const char *name);
-
-static int ovrp_slot(const char *name) {
-    pthread_mutex_lock(&g_ovrp_mu);
-    int rc = -1;
-    for (unsigned i = 0; i < g_novrp; i++)
-        if (strcmp(g_ovrp[i].name, name) == 0) { rc = (int)i; goto out; }
-    if (g_novrp >= KL_OVRP_MAX) goto out;
-    g_ovrp[g_novrp].name = strdup(name);
-    g_ovrp[g_novrp].calls = 0;
-    rc = (int)g_novrp++;
-out:
-    pthread_mutex_unlock(&g_ovrp_mu);
-    return rc;
-}
 
 // Reached through a per-name trampoline, so x0 is the entry point's own name.
 // The stub tail-calls here, so this return value is the ovrp_ call's return
@@ -215,6 +268,12 @@ static void ovrp_hit(const char *name) {
 static void ovrp_log_arg(const char *name, int arg, void *ra) {
     static struct { const char *name; int arg; void *ra; } seen[128];
     static int nseen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    // Saturation early-out BEFORE the lock: this runs on every instrumented
+    // entry call, and once 128 distinct (name,arg,ra) triples are on the
+    // record the walk can only reproduce itself. Taking the mutex and scanning
+    // 128 entries per call for the rest of the session, to conclude nothing,
+    // was measurable per-call overhead on the guest's frame path.
+    if (__atomic_load_n(&nseen, __ATOMIC_ACQUIRE) >= 128) return;
     pthread_mutex_lock(&mu);
     for (int i = 0; i < nseen; i++)
         if (seen[i].name == name && seen[i].arg == arg && seen[i].ra == ra) {
@@ -226,7 +285,8 @@ static void ovrp_log_arg(const char *name, int arg, void *ra) {
         fprintf(stderr, "  [ovrp] %s(arg=%d/0x%x) — first seen, called from %s+0x%zx\n",
                 name, arg, arg, img ? img : "?", off);
         seen[nseen].name = name; seen[nseen].arg = arg;
-        seen[nseen].ra = ra; nseen++;
+        seen[nseen].ra = ra;
+        __atomic_store_n(&nseen, nseen + 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&mu);
 }

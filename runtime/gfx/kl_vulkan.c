@@ -79,6 +79,14 @@ void  kl_vulkan_layer_rekey(int old_key, int new_key) { (void)old_key; (void)new
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
+// kl_ovrp's GetDisplayAdapterId2 calls this unconditionally, and the stub must
+// answer it the way the real one does for a guest that never made a Vulkan
+// instance: 0, adapter id untouched (empty). Same class as the entries above —
+// a bare checkout has to LINK, not just compile.
+int kl_vulkan_display_luid(uint8_t out[8]) { (void)out; return 0; }
+// kl_glfb's layer capture reaches this by name; with no Vulkan there are no
+// layers to capture, which is the stub's answer.
+void kl_vulkan_capture_layers(void) { }
 // The OpenXR seam. Answering "not supported" here is what keeps
 // XR_KHR_vulkan_enable OUT of the advertised extension list on a checkout with
 // no MoltenVK, so a Vulkan OpenXR guest is refused at xrCreateInstance — where

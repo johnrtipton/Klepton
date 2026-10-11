@@ -16,7 +16,7 @@ CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(R
 # VideoToolbox/CoreMedia/CoreVideo are the video decoder (kl_vtdec.c), and they
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
 # RUNTIME_SHIP — everything that links the runtime needs them.
-LDLIBS  := -lz -framework AudioToolbox \
+LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
            -framework CoreFoundation -framework AVFoundation -framework Foundation
 # The host/ship split is a source-list boundary, not a runtime getenv.
@@ -534,6 +534,29 @@ build/t_il2cpp: tests/t_il2cpp.c $(RUNTIME) $(RUNTIME_HDRS)
 
 il2cpp: build/t_il2cpp
 	./build/t_il2cpp
+
+# The hot-path microbenchmarks (tests/t_perf.c): the runtime's own entry
+# points at guest-call granularity — env lookups, the shim table, the pthread
+# shim, an ovrp entry, JNI dispatch, the audio converter. Host-only, no guest,
+# no window: `make perf` is the before/after instrument for a perf change, and
+# it is NOT in `make check` because its numbers are not a pass/fail.
+build/t_perf: tests/t_perf.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_perf.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: perf
+perf: build/t_perf
+	./build/t_perf
+
+# The same benchmarks at -O2, which is what the -O2 build-config change
+# (scratch/perf 00-MASTER item 1) is claimed to buy — the A/B in one command.
+build/t_perf_O2: tests/t_perf.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(filter-out -O1,$(CFLAGS)) -O2 -o $@ tests/t_perf.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: perf-O2
+perf-O2: build/t_perf_O2
+	./build/t_perf_O2
 
 # Full regression sweep — run this first when picking work back up.
 #

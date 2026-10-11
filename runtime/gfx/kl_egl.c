@@ -1669,7 +1669,12 @@ static unsigned klegl_SwapBuffers(EGLDisplay dpy, EGLSurface s) {
     // attached: a frame sink (the readback path) or a GPU fence (KL_VIEW=1's
     // hardware compositor, which wants the *timing* of the swap and none of
     // its pixels).
-    const char *out = kl_env_str("KL_GLFB_OUT", NULL);
+    //
+    // Latched: this ran a getenv (an environ walk) on every eglSwapBuffers —
+    // once per frame, forever — to answer a knob that is fixed at launch.
+    static const char *out;
+    static int out_read;
+    if (!out_read) { out_read = 1; out = kl_env_str("KL_GLFB_OUT", NULL); }
     if (kl_glfb_enabled() &&
         (out || kl_glfb_has_frame_sink() || kl_glfb_has_gpu_fence()))
         kl_glfb_present(out);
