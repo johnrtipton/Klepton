@@ -569,7 +569,7 @@ build/t_perf_safety: tests/t_perf_safety.c $(RUNTIME) $(RUNTIME_HDRS)
 	$(CC) $(CFLAGS) -o $@ tests/t_perf_safety.c $(filter-out runtime/xr/kl_ovrp.c,$(RUNTIME)) $(LDLIBS)
 
 .PHONY: check-host
-check-host: build/t_variadic build/t_fault build/t_haptics build/t_softinput build/t_xrspace build/t_xrinput build/t_trace build/t_ctr build/t_bcast build/t_hevc build/t_audio_convert build/t_perf_safety
+check-host: build/t_variadic build/t_fault build/t_haptics build/t_softinput build/t_xrspace build/t_xrinput build/t_trace build/t_ctr build/t_bcast build/t_hevc build/t_audio_convert build/t_perf_safety check-gl-draw
 	@set -e; for t in t_variadic t_fault t_haptics t_softinput t_xrspace t_xrinput t_trace t_ctr t_bcast t_hevc t_audio_convert t_perf_safety; do \
 	  ./build/$$t > build/$$t.host.log 2>&1 || { cat build/$$t.host.log; exit 1; }; \
 	  echo "$$t: PASS"; done
@@ -577,6 +577,38 @@ check-host: build/t_variadic build/t_fault build/t_haptics build/t_softinput bui
 .PHONY: check-host-O2
 check-host-O2:
 	$(MAKE) -B check-host CFLAGS='$(filter-out -O%,$(CFLAGS)) -O2'
+
+build/t_gl_draw_perf: tests/t_gl_draw_perf.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_gl_draw_perf.c $(filter-out runtime/gfx/kl_glfb.c,$(RUNTIME)) $(LDLIBS)
+
+.PHONY: check-gl-draw perf-gl-draw
+check-gl-draw: build/t_gl_draw_perf
+	@set -e; for mode in off census objects timeline error; do ./build/t_gl_draw_perf $$mode; done
+
+perf-gl-draw: build/t_gl_draw_perf
+	./build/t_gl_draw_perf bench
+
+build/t_vk_image_reg: tests/t_vk_image_reg.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vk_image_reg.c $(filter-out runtime/gfx/kl_vulkan.c,$(RUNTIME)) $(LDLIBS)
+
+.PHONY: check-vk-registry perf-vk-registry
+check-vk-registry: build/t_vk_image_reg
+	./build/t_vk_image_reg
+
+perf-vk-registry: build/t_vk_image_reg
+	./build/t_vk_image_reg bench
+
+# Vulkan registry checks need the headers from make mvk; the GL gate is also
+# part of check-host and works without those optional headers.
+.PHONY: check-graphics-O2 perf-graphics-O2
+check-graphics-O2:
+	$(MAKE) -B check-gl-draw check-vk-registry CFLAGS='$(filter-out -O%,$(CFLAGS)) -O2'
+
+perf-graphics-O2:
+	$(MAKE) -B build/t_gl_draw_perf build/t_vk_image_reg CFLAGS='$(filter-out -O%,$(CFLAGS)) -O2'
+	$(MAKE) perf-gl-draw perf-vk-registry
 
 # Full regression sweep — run this first when picking work back up.
 #

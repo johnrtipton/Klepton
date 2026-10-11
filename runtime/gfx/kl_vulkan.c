@@ -1360,20 +1360,52 @@ static void eye_publish_mtl(int stage, int eye, int layers) {
 // that into a clean failure. Locked - guest worker threads create both at once -
 // and FAIL-OPEN if it ever fills, so a legitimate view is never wrongly refused.
 #define KLVK_IMG_REG_MAX 16384
-static VkImage g_img_reg[KLVK_IMG_REG_MAX];
-static int g_img_reg_n;
+#define KLVK_IMG_REG_SLOTS (KLVK_IMG_REG_MAX * 2)
+static struct { VkImage img; unsigned refs; } g_img_reg[KLVK_IMG_REG_SLOTS];
+static int g_img_reg_n; // Registration count, including duplicates, as before.
 static pthread_mutex_t g_img_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t klvk_hash64(uint64_t x);
+
+// Under g_img_reg_lock. At most 16384 distinct keys in 32768 slots, so an
+// empty bucket always exists. Zero handles are never registered.
+static unsigned klvk_img_reg_slot(VkImage img) {
+    unsigned k = klvk_hash64((uint64_t)(uintptr_t)img) & (KLVK_IMG_REG_SLOTS - 1);
+    while (g_img_reg[k].img && g_img_reg[k].img != img)
+        k = (k + 1) & (KLVK_IMG_REG_SLOTS - 1);
+    return k;
+}
 static void klvk_img_reg_add(VkImage img) {
     if (!img) return;
     pthread_mutex_lock(&g_img_reg_lock);
-    if (g_img_reg_n < KLVK_IMG_REG_MAX) g_img_reg[g_img_reg_n++] = img;
+    if (g_img_reg_n < KLVK_IMG_REG_MAX) {
+        unsigned k = klvk_img_reg_slot(img);
+        g_img_reg[k].img = img;
+        g_img_reg[k].refs++;
+        g_img_reg_n++;
+    }
     pthread_mutex_unlock(&g_img_reg_lock);
 }
 static void klvk_img_reg_del(VkImage img) {
     if (!img) return;
     pthread_mutex_lock(&g_img_reg_lock);
-    for (int i = 0; i < g_img_reg_n; i++)
-        if (g_img_reg[i] == img) { g_img_reg[i] = g_img_reg[--g_img_reg_n]; break; }
+    unsigned hole = klvk_img_reg_slot(img);
+    if (g_img_reg[hole].img) {
+        g_img_reg_n--;
+        if (--g_img_reg[hole].refs == 0) {
+            // Back-shift deletion keeps lookup chains connected without
+            // tombstones accumulating during level-load create/destroy churn.
+            const unsigned mask = KLVK_IMG_REG_SLOTS - 1;
+            for (unsigned j = (hole + 1) & mask; g_img_reg[j].img; j = (j + 1) & mask) {
+                unsigned home = klvk_hash64((uint64_t)(uintptr_t)g_img_reg[j].img) & mask;
+                if (((j - home) & mask) >= ((j - hole) & mask)) {
+                    g_img_reg[hole] = g_img_reg[j];
+                    hole = j;
+                }
+            }
+            g_img_reg[hole].img = VK_NULL_HANDLE;
+            g_img_reg[hole].refs = 0;
+        }
+    }
     pthread_mutex_unlock(&g_img_reg_lock);
 }
 
@@ -1440,8 +1472,7 @@ static int klvk_img_reg_has(VkImage img) {
     int found = 0;
     pthread_mutex_lock(&g_img_reg_lock);
     if (g_img_reg_n >= KLVK_IMG_REG_MAX) found = 1;   /* full -> fail open */
-    else for (int i = 0; i < g_img_reg_n; i++)
-        if (g_img_reg[i] == img) { found = 1; break; }
+    else if (img) found = g_img_reg[klvk_img_reg_slot(img)].img != VK_NULL_HANDLE;
     pthread_mutex_unlock(&g_img_reg_lock);
     return found;
 }

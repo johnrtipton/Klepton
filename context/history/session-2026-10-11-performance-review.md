@@ -20,3 +20,17 @@
 - Full compatibility suite and live gameplay/audio acceptance remain outside
   the guest-free results. Next: controlled headset scene comparison and profile
   Vulkan GPU synchronization, GLES diagnostics and per-image symbol lookup.
+
+## Graphics continuation
+
+- Gated GL per-draw census and error formatting; retained BLIT_PROBE's live-FBO
+  tracking and documented opt-in diagnostics. Five modes added to check-host.
+- Replaced Vulkan image registry scan with locked hash/back-shift index; kept
+  duplicate/capacity/fail-open behavior. Differential + shared-handle stress pass.
+- Three O2 comparisons vs 16c2f1e: DrawElements 121.04 ->15.54 ns,
+  instanced 117.37 ->12.42 ns; DrawArrays unchanged. Registry at12K entries
+  about2380 ->5.6 ns. These are CPU microbenchmarks, not headset FPS.
+- O2 host suite passes (UDP bind required escalation); device/sim full Vulkan
+  and fallback builds both compile/all-load link. Queue synchronization preserved.
+- Detailed evidence: scratch/perf/GRAPHICS-2026-10-11.md. Controlled device
+  protocol: scratch/perf/GAMEPLAY-VALIDATION.md. No headset game launched.
